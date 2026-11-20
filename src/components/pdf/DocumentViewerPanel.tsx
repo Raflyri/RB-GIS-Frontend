@@ -117,14 +117,14 @@ export default function DocumentViewerPanel({
         <button
           type="button"
           onClick={onClose}
-          className="rounded-lg p-1 text-slate-400 transition-colors hover:bg-slate-200/70 hover:text-slate-700"
+          className="inline-flex min-h-[36px] min-w-[36px] items-center justify-center rounded-lg p-1.5 text-slate-500 transition-colors hover:bg-slate-200/70 hover:text-slate-700"
           aria-label="Tutup viewer dokumen"
         >
           <X className="h-4 w-4" />
         </button>
       </header>
 
-      <nav className="flex gap-1 border-b border-slate-200 bg-slate-50/50 px-3 pt-2 text-xs">
+      <nav className="flex flex-wrap items-center gap-1 border-b border-slate-200 bg-slate-50/50 px-3 pt-2 text-xs">
         {(
           [
             ["pdf", "PDF Viewer", FileText],

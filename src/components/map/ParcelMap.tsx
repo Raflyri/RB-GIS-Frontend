@@ -1,19 +1,26 @@
 "use client";
 
 import MapboxDraw from "@mapbox/mapbox-gl-draw";
+import booleanPointInPolygon from "@turf/boolean-point-in-polygon";
 import {
+  AlertCircle,
   Check,
   ChevronDown,
   ChevronUp,
   Copy,
+  Crosshair,
+  FileText,
   FileUp,
   ImagePlus,
   Layers,
   Loader2,
+  LocateFixed,
   Lock,
   LockOpen,
   Map as MapIcon,
+  Navigation,
   Pentagon,
+  Plus,
   RefreshCw,
   RotateCcw,
   Satellite,
@@ -28,12 +35,13 @@ import maplibregl, {
   type MapGeoJSONFeature,
   type StyleSpecification,
 } from "maplibre-gl";
-import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 
 import { LEGAL_STATUS_COLOR_EXPRESSION, formatArea, toNumber } from "@/lib/thematic";
 import type {
   GeoJSONGeometry,
   ParcelDetailRead,
+  ParcelFeature,
   ParcelFeatureCollection,
   ParcelImportFeaturePreview,
 } from "@/lib/types";
@@ -54,6 +62,15 @@ const OVERLAY_LAYER_ID = "ldkh-image-overlay-layer";
 const OVERLAY_FRAME_SOURCE_ID = "ldkh-image-overlay-frame";
 const OVERLAY_FRAME_LAYER_ID = "ldkh-image-overlay-frame-layer";
 
+const GPS_ACCURACY_SOURCE_ID = "ldkh-gps-accuracy";
+const GPS_ACCURACY_FILL_LAYER = "ldkh-gps-accuracy-fill";
+const GPS_ACCURACY_LINE_LAYER = "ldkh-gps-accuracy-line";
+
+const EMPTY_FEATURE_COLLECTION: GeoJSON.FeatureCollection = {
+  type: "FeatureCollection",
+  features: [],
+};
+
 const BASEMAP_LAYER_IDS = {
   road: "basemap-osm",
   satellite: "basemap-satellite",
@@ -62,6 +79,13 @@ const BASEMAP_LAYER_IDS = {
 } as const;
 
 type BasemapMode = "road" | "satellite" | "hybrid";
+type GpsState = "idle" | "locating" | "tracking";
+interface GpsPosition {
+  lng: number;
+  lat: number;
+  accuracy: number;
+  heading: number | null;
+}
 type LngLatTuple = [number, number];
 type OverlayCorners = [LngLatTuple, LngLatTuple, LngLatTuple, LngLatTuple];
 
@@ -196,6 +220,64 @@ const WGS84_RADIUS = 6378137;
 
 function rad(deg: number): number {
   return (deg * Math.PI) / 180;
+}
+
+function buildAccuracyCircleGeoJSON(
+  lng: number,
+  lat: number,
+  accuracyMeters: number,
+): GeoJSON.FeatureCollection {
+  const radius = Math.max(accuracyMeters, 2);
+  const steps = 64;
+  const latRad = rad(lat);
+  const dLat = (radius / WGS84_RADIUS) * (180 / Math.PI);
+  const cosLat = Math.max(0.01, Math.cos(latRad));
+  const dLng = dLat / cosLat;
+
+  const ring: [number, number][] = [];
+  for (let i = 0; i <= steps; i++) {
+    const theta = (i / steps) * 2 * Math.PI;
+    ring.push([lng + dLng * Math.cos(theta), lat + dLat * Math.sin(theta)]);
+  }
+
+  return {
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        properties: {},
+        geometry: {
+          type: "Polygon",
+          coordinates: [ring],
+        },
+      },
+    ],
+  };
+}
+
+function createGpsUserMarkerElements(): {
+  container: HTMLDivElement;
+  headingEl: HTMLDivElement;
+} {
+  const container = document.createElement("div");
+  container.className = "pointer-events-none relative flex h-8 w-8 items-center justify-center";
+
+  const pulse = document.createElement("div");
+  pulse.className = "absolute h-7 w-7 animate-ping rounded-full bg-blue-500/35";
+  container.appendChild(pulse);
+
+  const headingEl = document.createElement("div");
+  headingEl.className = "absolute inset-0 hidden items-start justify-center";
+  headingEl.innerHTML =
+    '<div style="width:0;height:0;margin-top:-2px;border-left:5px solid transparent;border-right:5px solid transparent;border-bottom:9px solid #1D4ED8;"></div>';
+  container.appendChild(headingEl);
+
+  const dot = document.createElement("div");
+  dot.className =
+    "relative h-4 w-4 rounded-full border-2 border-white bg-blue-600 shadow-md ring-2 ring-blue-500/30";
+  container.appendChild(dot);
+
+  return { container, headingEl };
 }
 
 function ringAreaM2(coords: number[][]): number {
@@ -669,34 +751,40 @@ function applyImportPreviewData(
 
 interface ParcelMapProps {
   data: ParcelFeatureCollection | null;
+  allParcels?: ParcelFeatureCollection | null;
   selectedParcelId: string | null;
   highlightedParcelIds?: string[] | null;
   isAdmin?: boolean;
   canEdit?: boolean;
   importPreviewFeatures?: ParcelImportFeaturePreview[] | null;
   onOpenImportModal?: () => void;
+  onOpenDocument?: (documentId: string) => void;
   onSelectParcel: (parcelId: string | null) => void;
   onPolygonDrawn?: (geometry: GeoJSONGeometry) => void;
   clearDraftSignal?: number;
   editingParcel?: ParcelDetailRead | null;
   onSaveEditedGeometry?: (parcelId: string, geometry: GeoJSONGeometry) => Promise<void>;
   onCancelEditGeometry?: () => void;
+  onFocusModeChange?: (active: boolean) => void;
 }
 
 export default function ParcelMap({
   data,
+  allParcels = null,
   selectedParcelId,
   highlightedParcelIds = null,
   isAdmin = false,
   canEdit = true,
   importPreviewFeatures = null,
   onOpenImportModal,
+  onOpenDocument,
   onSelectParcel,
   onPolygonDrawn,
   clearDraftSignal,
   editingParcel = null,
   onSaveEditedGeometry,
   onCancelEditGeometry,
+  onFocusModeChange,
 }: ParcelMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -709,6 +797,8 @@ export default function ParcelMap({
   const isDrawingRef = useRef(false);
   const onSelectRef = useRef(onSelectParcel);
   const onPolygonDrawnRef = useRef(onPolygonDrawn);
+  const onFocusModeChangeRef = useRef(onFocusModeChange);
+  const undoDrawVertexRef = useRef<(() => void) | null>(null);
   const dataRef = useRef<ParcelFeatureCollection | null>(data);
   const importPreviewRef = useRef<ParcelImportFeaturePreview[] | null>(importPreviewFeatures);
   const didFitRef = useRef(false);
@@ -743,24 +833,68 @@ export default function ParcelMap({
   const [editedGeometry, setEditedGeometry] = useState<GeoJSONGeometry | null>(null);
   const [savingGeometry, setSavingGeometry] = useState(false);
   const [editGeometryError, setEditGeometryError] = useState<string | null>(null);
+  const [mobileFabOpen, setMobileFabOpen] = useState(false);
+
+  const [gpsState, setGpsState] = useState<GpsState>("idle");
+  const [gpsPosition, setGpsPosition] = useState<GpsPosition | null>(null);
+  const [gpsFollow, setGpsFollow] = useState(true);
+  const [gpsError, setGpsError] = useState<string | null>(null);
+  const [copiedGpsCoord, setCopiedGpsCoord] = useState(false);
+  const gpsWatchIdRef = useRef<number | null>(null);
+  const gpsMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const gpsHeadingElRef = useRef<HTMLDivElement | null>(null);
+  const gpsPositionRef = useRef<GpsPosition | null>(null);
+  const gpsFollowRef = useRef(true);
+  const gpsFirstFixRef = useRef(false);
+  const gpsErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const gpsCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   onSelectRef.current = onSelectParcel;
   onPolygonDrawnRef.current = onPolygonDrawn;
+  onFocusModeChangeRef.current = onFocusModeChange;
   dataRef.current = data;
   highlightedIdsRef.current = highlightedParcelIds;
+
+  const isFocusMode =
+    isDrawing || Boolean(editingParcel) || (Boolean(overlayImage) && !overlayLocked);
+
+  useEffect(() => {
+    onFocusModeChangeRef.current?.(isFocusMode);
+    if (isFocusMode) {
+      setMobileFabOpen(false);
+    }
+  }, [isFocusMode]);
 
   // Inisialisasi peta (sekali).
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
+    const mapContainer = containerRef.current;
     const map = new maplibregl.Map({
-      container: containerRef.current,
+      container: mapContainer,
       style: BASEMAP_STYLE,
       center: DEFAULT_CENTER,
       zoom: DEFAULT_ZOOM,
       attributionControl: { compact: true },
     });
     mapRef.current = map;
+
+    let orientationTimer: ReturnType<typeof setTimeout> | null = null;
+    const handleOrientationChange = () => {
+      if (orientationTimer) clearTimeout(orientationTimer);
+      orientationTimer = setTimeout(() => {
+        mapRef.current?.resize();
+      }, 150);
+    };
+    window.addEventListener("orientationchange", handleOrientationChange);
+
+    const resizeObserver =
+      typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(() => {
+            mapRef.current?.resize();
+          })
+        : null;
+    resizeObserver?.observe(mapContainer);
 
     map.addControl(new maplibregl.NavigationControl(), "top-right");
     map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-left");
@@ -920,6 +1054,40 @@ export default function ParcelMap({
         },
       });
 
+      map.addSource(GPS_ACCURACY_SOURCE_ID, {
+        type: "geojson",
+        data: EMPTY_FEATURE_COLLECTION,
+      });
+
+      map.addLayer({
+        id: GPS_ACCURACY_FILL_LAYER,
+        type: "fill",
+        source: GPS_ACCURACY_SOURCE_ID,
+        paint: {
+          "fill-color": "#3B82F6",
+          "fill-opacity": 0.16,
+        },
+      });
+
+      map.addLayer({
+        id: GPS_ACCURACY_LINE_LAYER,
+        type: "line",
+        source: GPS_ACCURACY_SOURCE_ID,
+        paint: {
+          "line-color": "#2563EB",
+          "line-width": 1.5,
+          "line-dasharray": [2, 2],
+          "line-opacity": 0.7,
+        },
+      });
+
+      map.on("dragstart", (e) => {
+        if (e.originalEvent && gpsWatchIdRef.current !== null) {
+          gpsFollowRef.current = false;
+          setGpsFollow(false);
+        }
+      });
+
       map.on("mousemove", FILL_LAYER, (e) => {
         if (isDrawingRef.current || editingParcelIdRef.current !== null) return;
         const feature = e.features?.[0] as MapGeoJSONFeature | undefined;
@@ -974,6 +1142,7 @@ export default function ParcelMap({
         drawClasses.CONTROL_GROUP = "maplibregl-ctrl-group";
       }
 
+      const baseDrawPolygon = MapboxDraw.modes?.draw_polygon;
       const draw = new MapboxDraw({
         displayControlsDefault: false,
         controls: {
@@ -981,6 +1150,52 @@ export default function ParcelMap({
           trash: true,
         },
         defaultMode: "simple_select",
+        ...(baseDrawPolygon
+          ? {
+              modes: {
+                ...MapboxDraw.modes,
+                draw_polygon: {
+                  ...baseDrawPolygon,
+                  onSetup(options) {
+                    const state = (baseDrawPolygon.onSetup?.call(this, options) ?? {}) as {
+                      polygon?: {
+                        id: string;
+                        removeCoordinate: (path: string) => void;
+                        getCoordinate: (path: string) => number[];
+                        updateCoordinate: (path: string, lng: number, lat: number) => void;
+                      };
+                      currentVertexPosition?: number;
+                    };
+                    const ctxStore = (
+                      this as unknown as { _ctx?: { store?: { render?: () => void } } }
+                    )._ctx?.store;
+
+                    undoDrawVertexRef.current = () => {
+                      const pos = state.currentVertexPosition ?? 0;
+                      if (!state.polygon || pos <= 1) {
+                        drawRef.current?.deleteAll();
+                        drawRef.current?.changeMode("draw_polygon");
+                        return;
+                      }
+                      state.polygon.removeCoordinate(`0.${pos}`);
+                      const nextPos = pos - 1;
+                      state.currentVertexPosition = nextPos;
+                      const prev = state.polygon.getCoordinate(`0.${nextPos - 1}`);
+                      if (prev && prev.length >= 2) {
+                        state.polygon.updateCoordinate(`0.${nextPos}`, prev[0], prev[1]);
+                      }
+                      ctxStore?.render?.();
+                    };
+                    return state;
+                  },
+                  onStop(state) {
+                    undoDrawVertexRef.current = null;
+                    baseDrawPolygon.onStop?.call(this, state);
+                  },
+                },
+              },
+            }
+          : {}),
       });
 
       map.addControl(draw as unknown as maplibregl.IControl, "top-right");
@@ -1058,6 +1273,28 @@ export default function ParcelMap({
     return () => {
       loadedRef.current = false;
       setDrawReady(false);
+      undoDrawVertexRef.current = null;
+      if (gpsWatchIdRef.current !== null && typeof navigator !== "undefined" && navigator.geolocation) {
+        navigator.geolocation.clearWatch(gpsWatchIdRef.current);
+        gpsWatchIdRef.current = null;
+      }
+      gpsMarkerRef.current?.remove();
+      gpsMarkerRef.current = null;
+      gpsHeadingElRef.current = null;
+      if (gpsErrorTimerRef.current) {
+        clearTimeout(gpsErrorTimerRef.current);
+        gpsErrorTimerRef.current = null;
+      }
+      if (gpsCopyTimerRef.current) {
+        clearTimeout(gpsCopyTimerRef.current);
+        gpsCopyTimerRef.current = null;
+      }
+      if (orientationTimer) {
+        clearTimeout(orientationTimer);
+        orientationTimer = null;
+      }
+      window.removeEventListener("orientationchange", handleOrientationChange);
+      resizeObserver?.disconnect();
       if (copyTimerRef.current) {
         clearTimeout(copyTimerRef.current);
         copyTimerRef.current = null;
@@ -1205,6 +1442,24 @@ export default function ParcelMap({
     draw.deleteAll();
     draw.changeMode("simple_select");
     setHasDraftPolygon(false);
+  };
+
+  const handleUndoDrawVertex = () => {
+    const draw = drawRef.current;
+    if (!draw || draw.getMode() !== "draw_polygon") return;
+    if (undoDrawVertexRef.current) {
+      undoDrawVertexRef.current();
+      return;
+    }
+    const first = draw.getAll().features[0];
+    if (
+      first?.geometry.type === "Polygon" &&
+      Array.isArray(first.geometry.coordinates[0]) &&
+      first.geometry.coordinates[0].length <= 3
+    ) {
+      draw.deleteAll();
+      draw.changeMode("draw_polygon");
+    }
   };
 
   useEffect(() => {
@@ -1433,6 +1688,222 @@ export default function ParcelMap({
     setCopiedGcp(false);
   };
 
+  const showGpsErrorToast = (message: string) => {
+    setGpsError(message);
+    if (gpsErrorTimerRef.current) clearTimeout(gpsErrorTimerRef.current);
+    gpsErrorTimerRef.current = setTimeout(() => {
+      setGpsError(null);
+    }, 6000);
+  };
+
+  const stopGpsTracking = () => {
+    if (gpsWatchIdRef.current !== null && typeof navigator !== "undefined" && navigator.geolocation) {
+      navigator.geolocation.clearWatch(gpsWatchIdRef.current);
+      gpsWatchIdRef.current = null;
+    }
+    gpsMarkerRef.current?.remove();
+    gpsMarkerRef.current = null;
+    gpsHeadingElRef.current = null;
+    gpsPositionRef.current = null;
+    gpsFollowRef.current = true;
+    gpsFirstFixRef.current = false;
+
+    const map = mapRef.current;
+    if (map && loadedRef.current) {
+      const accSource = map.getSource(GPS_ACCURACY_SOURCE_ID) as GeoJSONSource | undefined;
+      accSource?.setData(EMPTY_FEATURE_COLLECTION);
+    }
+
+    setGpsState("idle");
+    setGpsPosition(null);
+    setGpsFollow(true);
+    setCopiedGpsCoord(false);
+  };
+
+  const startGpsTracking = () => {
+    if (typeof window === "undefined" || typeof navigator === "undefined" || !("geolocation" in navigator)) {
+      showGpsErrorToast(
+        "Fitur Live GPS tidak didukung pada browser ini.",
+      );
+      return;
+    }
+
+    const isLoopback =
+      window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+    if (!window.isSecureContext && !isLoopback) {
+      showGpsErrorToast(
+        "Fitur Live GPS membutuhkan koneksi HTTPS yang aman atau browser yang mendukung Geolocation.",
+      );
+      return;
+    }
+
+    if (gpsWatchIdRef.current !== null) {
+      navigator.geolocation.clearWatch(gpsWatchIdRef.current);
+      gpsWatchIdRef.current = null;
+    }
+
+    setGpsError(null);
+    setGpsState("locating");
+    gpsFollowRef.current = true;
+    setGpsFollow(true);
+    gpsFirstFixRef.current = true;
+
+    gpsWatchIdRef.current = navigator.geolocation.watchPosition(
+      (pos) => {
+        const lng = pos.coords.longitude;
+        const lat = pos.coords.latitude;
+        const accuracy =
+          typeof pos.coords.accuracy === "number" && Number.isFinite(pos.coords.accuracy)
+            ? pos.coords.accuracy
+            : 10;
+        const heading =
+          pos.coords.heading !== null &&
+          typeof pos.coords.heading === "number" &&
+          Number.isFinite(pos.coords.heading)
+            ? pos.coords.heading
+            : null;
+
+        const nextPosition: GpsPosition = { lng, lat, accuracy, heading };
+        gpsPositionRef.current = nextPosition;
+        setGpsState("tracking");
+        setGpsPosition(nextPosition);
+
+        const map = mapRef.current;
+        if (!map) return;
+
+        if (!gpsMarkerRef.current) {
+          const { container, headingEl } = createGpsUserMarkerElements();
+          gpsHeadingElRef.current = headingEl;
+          gpsMarkerRef.current = new maplibregl.Marker({
+            element: container,
+            anchor: "center",
+          })
+            .setLngLat([lng, lat])
+            .addTo(map);
+        } else {
+          gpsMarkerRef.current.setLngLat([lng, lat]);
+        }
+
+        if (gpsHeadingElRef.current) {
+          if (heading !== null) {
+            gpsHeadingElRef.current.style.display = "flex";
+            gpsHeadingElRef.current.style.transform = `rotate(${heading}deg)`;
+          } else {
+            gpsHeadingElRef.current.style.display = "none";
+          }
+        }
+
+        if (loadedRef.current) {
+          const accSource = map.getSource(GPS_ACCURACY_SOURCE_ID) as GeoJSONSource | undefined;
+          accSource?.setData(buildAccuracyCircleGeoJSON(lng, lat, accuracy));
+        }
+
+        if (gpsFirstFixRef.current) {
+          gpsFirstFixRef.current = false;
+          map.flyTo({
+            center: [lng, lat],
+            zoom: Math.max(map.getZoom(), 18),
+            duration: 900,
+          });
+        } else if (gpsFollowRef.current) {
+          map.easeTo({
+            center: [lng, lat],
+            duration: 450,
+          });
+        }
+      },
+      (err) => {
+        let message = "Gagal membaca posisi GPS perangkat Anda.";
+        if (err.code === 1) {
+          message =
+            "Izin akses lokasi (GPS) ditolak. Aktifkan izin lokasi di pengaturan browser/perangkat Anda.";
+        } else if (err.code === 2) {
+          message =
+            "Sinyal GPS lemah atau posisi tidak tersedia. Pastikan GPS aktif di area terbuka.";
+        } else if (err.code === 3) {
+          message =
+            "Waktu pencarian sinyal GPS habis. Silakan coba lagi di area dengan sinyal lebih baik.";
+        }
+        stopGpsTracking();
+        showGpsErrorToast(message);
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 15000,
+        maximumAge: 0,
+      },
+    );
+  };
+
+  const handleGpsButtonClick = () => {
+    if (gpsState === "idle") {
+      startGpsTracking();
+      return;
+    }
+    if (gpsState === "locating") {
+      stopGpsTracking();
+      return;
+    }
+    if (!gpsFollowRef.current && gpsPosition && mapRef.current) {
+      gpsFollowRef.current = true;
+      setGpsFollow(true);
+      mapRef.current.flyTo({
+        center: [gpsPosition.lng, gpsPosition.lat],
+        zoom: Math.max(mapRef.current.getZoom(), 18),
+        duration: 700,
+      });
+      return;
+    }
+    stopGpsTracking();
+  };
+
+  const handleCopyGpsCoordinates = async () => {
+    if (!gpsPosition) return;
+    const formatted = `${gpsPosition.lat.toFixed(6)}, ${gpsPosition.lng.toFixed(6)}`;
+    try {
+      await copyTextToClipboard(formatted);
+      setCopiedGpsCoord(true);
+      if (gpsCopyTimerRef.current) clearTimeout(gpsCopyTimerRef.current);
+      gpsCopyTimerRef.current = setTimeout(() => setCopiedGpsCoord(false), 2200);
+    } catch (err) {
+      showGpsErrorToast((err as Error).message || "Gagal menyalin koordinat GPS ke clipboard.");
+    }
+  };
+
+  const matchedGpsParcel = useMemo<ParcelFeature | null>(() => {
+    if (!gpsPosition) return null;
+    const merged = new Map<string, ParcelFeature>();
+    for (const f of allParcels?.features ?? []) {
+      merged.set(f.properties.id, f);
+    }
+    for (const f of data?.features ?? []) {
+      merged.set(f.properties.id, f);
+    }
+    const pt = {
+      type: "Point" as const,
+      coordinates: [gpsPosition.lng, gpsPosition.lat],
+    };
+    for (const feature of Array.from(merged.values())) {
+      const geom = feature.geometry;
+      if (!geom || (geom.type !== "Polygon" && geom.type !== "MultiPolygon")) {
+        continue;
+      }
+      try {
+        if (
+          booleanPointInPolygon(
+            pt,
+            geom as unknown as GeoJSON.Polygon | GeoJSON.MultiPolygon,
+          )
+        ) {
+          return feature;
+        }
+      } catch {
+        /* abaikan geometri yang tidak valid */
+      }
+    }
+    return null;
+  }, [gpsPosition, data, allParcels]);
+
   const liveEditAreaM2 = computeGeometryAreaM2(editedGeometry);
   const docAreaM2 = toNumber(editingParcel?.area_m2);
   const liveDeltaM2 =
@@ -1441,7 +1912,11 @@ export default function ParcelMap({
       : null;
 
   return (
-    <div className="relative h-full w-full">
+    <div
+      className={`ldkh-map-canvas relative h-full w-full ${
+        isFocusMode ? "ldkh-map-focus" : ""
+      }`}
+    >
       <div ref={containerRef} className="h-full w-full" />
 
       {isAdmin && (
@@ -1455,7 +1930,11 @@ export default function ParcelMap({
       )}
 
       {/* Toolbar kiri-atas + floating panel Overlay Peta */}
-      <div className="pointer-events-none absolute left-3 right-14 top-3 z-10 flex flex-col items-start gap-2">
+      <div
+        className={`pointer-events-none top-safe absolute left-3 right-14 z-10 flex flex-col items-start gap-2 ${
+          !isFocusMode && overlayImage ? "mt-[5.25rem] md:mt-0" : ""
+        }`}
+      >
         <div className="flex flex-wrap items-center gap-2">
           {editingParcel ? (
             <div className="pointer-events-auto flex max-w-full flex-col gap-2 rounded-xl border border-emerald-200 bg-white/95 p-3 shadow-lg backdrop-blur-sm">
@@ -1466,7 +1945,7 @@ export default function ParcelMap({
                     Mode Edit Peta:{" "}
                     <span className="font-mono text-emerald-700">{editingParcel.parcel_code}</span>
                   </p>
-                  <p className="text-[11px] text-slate-500">
+                  <p className="hidden text-[11px] text-slate-500 sm:block">
                     Geser titik sudut untuk mengubah batas, klik titik tengah untuk menambah sudut, atau
                     tekan Delete untuk menghapus titik terpilih.
                   </p>
@@ -1493,7 +1972,7 @@ export default function ParcelMap({
                     type="button"
                     disabled={savingGeometry}
                     onClick={handleResetEditGeometry}
-                    className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50 disabled:opacity-50"
+                    className="inline-flex min-h-[38px] items-center gap-1 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50 disabled:opacity-50"
                     title="Kembalikan poligon ke bentuk awal sebelum diedit"
                   >
                     <RotateCcw className="h-3.5 w-3.5" />
@@ -1503,7 +1982,7 @@ export default function ParcelMap({
                     type="button"
                     disabled={savingGeometry}
                     onClick={handleCancelEditGeometry}
-                    className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50 disabled:opacity-50"
+                    className="inline-flex min-h-[38px] items-center gap-1 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50 disabled:opacity-50"
                   >
                     <X className="h-3.5 w-3.5" />
                     Batal
@@ -1512,7 +1991,7 @@ export default function ParcelMap({
                     type="button"
                     disabled={savingGeometry || !editedGeometry}
                     onClick={handleSaveEditGeometry}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {savingGeometry ? (
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1530,7 +2009,7 @@ export default function ParcelMap({
               )}
             </div>
           ) : !isDrawing ? (
-            <>
+            <div className="hidden flex-wrap items-center gap-2 md:flex">
               {canEdit && (
                 <button
                   type="button"
@@ -1594,21 +2073,34 @@ export default function ParcelMap({
                   Hapus Draft Poligon
                 </button>
               )}
-            </>
+            </div>
           ) : (
-            <>
+            <div className="flex flex-wrap items-center gap-2">
               <div className="pointer-events-auto rounded-lg border border-blue-200 bg-white/95 px-3 py-1.5 text-xs font-medium text-slate-700 shadow-md backdrop-blur-sm">
-                Klik titik sudut batas tanah di peta, lalu klik titik awal atau klik dua kali untuk menutup poligon
+                <span className="hidden sm:inline">
+                  Klik titik sudut batas tanah di peta, lalu klik titik awal atau klik dua kali untuk menutup poligon
+                </span>
+                <span className="sm:hidden">
+                  Ketuk peta untuk tambah sudut, ketuk 2x untuk selesai
+                </span>
               </div>
               <button
                 type="button"
+                onClick={handleUndoDrawVertex}
+                className="pointer-events-auto inline-flex min-h-[40px] items-center gap-1 rounded-lg border border-blue-200 bg-white px-2.5 py-1.5 text-xs font-medium text-blue-700 shadow-md transition-colors hover:bg-blue-50"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Undo Titik
+              </button>
+              <button
+                type="button"
                 onClick={handleCancelDrawing}
-                className="pointer-events-auto inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 shadow-md transition-colors hover:bg-slate-50"
+                className="pointer-events-auto inline-flex min-h-[40px] items-center gap-1 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 shadow-md transition-colors hover:bg-slate-50"
               >
                 <X className="h-3.5 w-3.5" />
                 Batal
               </button>
-            </>
+            </div>
           )}
         </div>
 
@@ -1761,11 +2253,254 @@ export default function ParcelMap({
         )}
       </div>
 
+      {/* Toast error izin / sinyal GPS berbahasa Indonesia */}
+      {gpsError && (
+        <div
+          role="alert"
+          className="pointer-events-auto absolute left-3 right-3 top-[calc(env(safe-area-inset-top,0px)+6.5rem)] z-30 mx-auto flex max-w-md items-start gap-2 rounded-xl border border-red-200 bg-red-50/95 px-3 py-2 text-xs font-medium text-red-700 shadow-lg backdrop-blur-sm md:left-1/2 md:right-auto md:top-16 md:-translate-x-1/2"
+        >
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
+          <span className="flex-1">{gpsError}</span>
+          <button
+            type="button"
+            onClick={() => setGpsError(null)}
+            className="rounded p-0.5 text-red-500 hover:bg-red-100 hover:text-red-700"
+            aria-label="Tutup pesan error GPS"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Indikator Live GPS Lapangan: akurasi + deteksi Point-in-Polygon + salin koordinat */}
+      {gpsState === "tracking" && gpsPosition && (
+        <div
+          className={`pointer-events-auto absolute left-3 right-16 z-10 flex max-w-md flex-wrap items-center gap-1.5 md:right-auto md:bottom-[5.5rem] ${
+            isFocusMode
+              ? "bottom-[calc(env(safe-area-inset-bottom,0px)+5.25rem)]"
+              : "bottom-[calc(env(safe-area-inset-bottom,0px)+14.5dvh+5.35rem)]"
+          }`}
+        >
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-blue-200 bg-white/95 px-2.5 py-1 text-[11px] font-semibold tabular-nums text-blue-700 shadow-md backdrop-blur-sm">
+            <span className="h-2 w-2 animate-pulse rounded-full bg-blue-600" />
+            GPS ±{Math.max(1, Math.round(gpsPosition.accuracy))} m
+          </span>
+
+          {matchedGpsParcel ? (
+            <div className="inline-flex flex-wrap items-center gap-1 rounded-full border border-emerald-400 bg-emerald-600 p-0.5 pl-2.5 text-[11px] font-semibold text-white shadow-md">
+              <button
+                type="button"
+                onClick={() => onSelectParcel(matchedGpsParcel.properties.id)}
+                className="inline-flex min-h-[28px] items-center gap-1 rounded-full pr-1.5 text-left hover:underline"
+                title="Klik untuk membuka detail persil"
+              >
+                <span>
+                  Di dalam persil:{" "}
+                  <span className="font-mono font-bold">
+                    {matchedGpsParcel.properties.parcel_code}
+                  </span>
+                </span>
+              </button>
+              {matchedGpsParcel.properties.primary_document_id && onOpenDocument && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onOpenDocument(matchedGpsParcel.properties.primary_document_id!)
+                  }
+                  className="inline-flex min-h-[28px] items-center gap-1 rounded-full bg-white/20 px-2 py-0.5 text-[10px] font-semibold text-white transition-colors hover:bg-white/30"
+                  title="Buka dokumen PDF utama persil ini"
+                >
+                  <FileText className="h-3 w-3" />
+                  Lihat PDF
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="inline-flex flex-wrap items-center gap-1.5 rounded-full border border-slate-200/90 bg-white/95 py-0.5 pl-2.5 pr-1 text-[11px] text-slate-700 shadow-md backdrop-blur-sm">
+              <Navigation className="h-3 w-3 shrink-0 text-slate-400" />
+              <span className="font-mono tabular-nums">
+                {gpsPosition.lat.toFixed(6)}, {gpsPosition.lng.toFixed(6)}
+              </span>
+              <button
+                type="button"
+                onClick={handleCopyGpsCoordinates}
+                className={`inline-flex min-h-[28px] items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold transition-colors ${
+                  copiedGpsCoord
+                    ? "bg-emerald-600 text-white"
+                    : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                }`}
+              >
+                {copiedGpsCoord ? (
+                  <>
+                    <Check className="h-3 w-3" />
+                    Tersalin!
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-3 w-3" />
+                    Salin Koordinat
+                  </>
+                )}
+              </button>
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={stopGpsTracking}
+            className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-200 bg-white/95 text-slate-500 shadow-md backdrop-blur-sm hover:bg-red-50 hover:text-red-600"
+            title="Matikan pelacakan GPS"
+            aria-label="Matikan pelacakan GPS"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Kontrol sudut kanan-bawah: Mobile Admin FAB "+" + Tombol Live GPS "Lokasi Saya" */}
+      <div
+        className={`ldkh-map-bottom-right pointer-events-none absolute right-3 z-20 flex flex-col items-end gap-2.5 md:bottom-10 ${
+          isFocusMode
+            ? "bottom-[calc(env(safe-area-inset-bottom,0px)+2.25rem)]"
+            : "bottom-[calc(env(safe-area-inset-bottom,0px)+14.5dvh+2.5rem)]"
+        }`}
+      >
+        {!isFocusMode && (canEdit || isAdmin || hasDraftPolygon) && (
+          <div className="flex flex-col items-end gap-2 md:hidden">
+            {mobileFabOpen && (
+              <div className="pointer-events-auto flex flex-col items-end gap-2">
+                {hasDraftPolygon && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMobileFabOpen(false);
+                      handleClearDraft();
+                    }}
+                    className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-red-200 bg-white/95 px-3.5 py-2 text-xs font-semibold text-red-600 shadow-lg backdrop-blur-sm active:bg-red-50"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    Hapus Draft Poligon
+                  </button>
+                )}
+                {isAdmin && onOpenImportModal && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMobileFabOpen(false);
+                      onOpenImportModal();
+                    }}
+                    className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-slate-200 bg-white/95 px-3.5 py-2 text-xs font-semibold text-slate-800 shadow-lg backdrop-blur-sm active:bg-slate-50"
+                  >
+                    <FileUp className="h-4 w-4 text-indigo-600" />
+                    Import Peta
+                  </button>
+                )}
+                {isAdmin && (
+                  <button
+                    type="button"
+                    disabled={overlayLoading}
+                    onClick={() => {
+                      setMobileFabOpen(false);
+                      handleOpenOverlayPicker();
+                    }}
+                    className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-slate-200 bg-white/95 px-3.5 py-2 text-xs font-semibold text-slate-800 shadow-lg backdrop-blur-sm active:bg-slate-50 disabled:opacity-60"
+                  >
+                    {overlayLoading ? (
+                      <Loader2 className="h-4 w-4 animate-spin text-sky-600" />
+                    ) : (
+                      <ImagePlus className="h-4 w-4 text-sky-600" />
+                    )}
+                    {overlayLoading
+                      ? "Memproses Overlay..."
+                      : overlayImage
+                        ? "Ganti Overlay Peta"
+                        : "Overlay Peta"}
+                  </button>
+                )}
+                {canEdit && (
+                  <button
+                    type="button"
+                    disabled={!drawReady}
+                    onClick={() => {
+                      setMobileFabOpen(false);
+                      handleStartDrawing();
+                    }}
+                    className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-blue-600 px-3.5 py-2 text-xs font-semibold text-white shadow-lg active:bg-blue-700 disabled:opacity-50"
+                  >
+                    <Pentagon className="h-4 w-4" />
+                    Tambah Lokasi Tanah
+                  </button>
+                )}
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setMobileFabOpen((prev) => !prev)}
+              aria-label={mobileFabOpen ? "Tutup menu aksi peta" : "Buka menu aksi peta"}
+              aria-expanded={mobileFabOpen}
+              className="pointer-events-auto flex h-12 w-12 items-center justify-center rounded-full bg-blue-600 text-white shadow-lg transition-transform active:scale-95"
+            >
+              <Plus
+                className={`h-6 w-6 transition-transform duration-200 ${
+                  mobileFabOpen ? "rotate-45" : ""
+                }`}
+              />
+            </button>
+          </div>
+        )}
+
+        <button
+          type="button"
+          onClick={handleGpsButtonClick}
+          aria-pressed={gpsState === "tracking"}
+          aria-label={
+            gpsState === "idle"
+              ? "Aktifkan Lokasi Saya (Live GPS)"
+              : gpsState === "locating"
+                ? "Mencari sinyal GPS"
+                : gpsFollow
+                  ? "Matikan Lokasi Saya"
+                  : "Pusatkan ke Lokasi Saya"
+          }
+          title={
+            gpsState === "idle"
+              ? "Lokasi Saya (Live GPS)"
+              : gpsState === "locating"
+                ? "Mencari sinyal GPS..."
+                : gpsFollow
+                  ? "Tracking aktif — klik untuk matikan GPS"
+                  : "Klik untuk pusatkan ulang ke Lokasi Saya"
+          }
+          className={`pointer-events-auto flex h-11 w-11 items-center justify-center rounded-xl border shadow-lg transition-all active:scale-95 ${
+            gpsState === "tracking"
+              ? gpsFollow
+                ? "border-blue-600 bg-blue-600 text-white ring-4 ring-blue-500/25"
+                : "border-blue-400 bg-blue-50 text-blue-600 ring-2 ring-blue-500/20"
+              : gpsState === "locating"
+                ? "border-blue-200 bg-white/95 text-blue-600"
+                : "border-slate-200/90 bg-white/95 text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+          }`}
+        >
+          {gpsState === "locating" ? (
+            <Loader2 className="h-5 w-5 animate-spin" />
+          ) : gpsState === "tracking" ? (
+            <LocateFixed className="h-5 w-5" />
+          ) : (
+            <Crosshair className="h-5 w-5" />
+          )}
+        </button>
+      </div>
+
       {/* Basemap Switcher di sudut kiri-bawah (di atas ScaleControl) */}
       <div
         role="group"
         aria-label="Pilih gaya peta dasar"
-        className="absolute bottom-10 left-3 z-10 inline-flex items-center gap-1 rounded-xl border border-slate-200/90 bg-white/95 p-1 shadow-md backdrop-blur-sm"
+        className={`absolute left-3 z-10 inline-flex items-center gap-1 rounded-xl border border-slate-200/90 bg-white/95 p-1 shadow-md backdrop-blur-sm md:bottom-10 ${
+          isFocusMode
+            ? "bottom-[calc(env(safe-area-inset-bottom,0px)+2.25rem)]"
+            : "bottom-[calc(env(safe-area-inset-bottom,0px)+14.5dvh+2.5rem)]"
+        }`}
       >
         {BASEMAP_OPTIONS.map(({ id, label, Icon }) => {
           const active = basemapMode === id;
@@ -1775,7 +2510,7 @@ export default function ParcelMap({
               type="button"
               onClick={() => setBasemapMode(id)}
               aria-pressed={active}
-              className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors ${
+              className={`inline-flex items-center gap-1 rounded-lg px-2 py-1.5 text-[11px] font-semibold transition-colors sm:gap-1.5 sm:px-2.5 sm:text-xs ${
                 active
                   ? "bg-blue-600 text-white shadow-sm"
                   : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"

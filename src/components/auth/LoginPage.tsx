@@ -35,7 +35,7 @@ export default function LoginPage({ onLoginSuccess, initialError }: LoginPagePro
   }
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-slate-50 px-4 py-10 text-slate-800">
+    <div className="flex min-h-[100dvh] flex-col items-center justify-center bg-slate-50 px-4 py-10 text-slate-800">
       <div className="w-full max-w-md overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl">
         <div className="border-b border-slate-200 bg-slate-50/80 px-6 py-5">
           <div className="flex items-center gap-3">

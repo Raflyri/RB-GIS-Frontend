@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@mapbox/mapbox-gl-draw": "^1.5.2",
+    "@turf/boolean-point-in-polygon": "^7.4.0",
     "clsx": "^2.1.1",
     "lucide-react": "^0.454.0",
     "maplibre-gl": "^4.7.0",

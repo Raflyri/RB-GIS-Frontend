@@ -21,6 +21,7 @@ export default function ParcelTable({
   onSelectParcel,
 }: ParcelTableProps) {
   const rowRefs = useRef<Record<string, HTMLTableRowElement | null>>({});
+  const cardRefs = useRef<Record<string, HTMLButtonElement | null>>({});
 
   const matchSet = useMemo(
     () => (highlightedParcelIds ? new Set(highlightedParcelIds) : null),
@@ -38,10 +39,14 @@ export default function ParcelTable({
     return [...matched, ...rest];
   }, [features, matchSet]);
 
-  // Klik poligon di peta -> sorot & scroll ke baris tabel yang sesuai.
+  // Klik poligon di peta -> sorot & scroll ke baris tabel / kartu mobile yang sesuai.
   useEffect(() => {
     if (selectedParcelId) {
       rowRefs.current[selectedParcelId]?.scrollIntoView({
+        block: "nearest",
+        behavior: "smooth",
+      });
+      cardRefs.current[selectedParcelId]?.scrollIntoView({
         block: "nearest",
         behavior: "smooth",
       });
@@ -57,7 +62,80 @@ export default function ParcelTable({
   }
 
   return (
-    <table className="w-full text-left text-xs">
+    <>
+      <div className="divide-y divide-slate-100 bg-white md:hidden">
+        {orderedFeatures.map(({ properties: p }) => {
+          const selected = p.id === selectedParcelId;
+          const aiMatched = matchSet?.has(p.id) ?? false;
+          const discrepancy = p.area_discrepancy_m2 ?? 0;
+          return (
+            <button
+              key={p.id}
+              type="button"
+              ref={(el) => {
+                cardRefs.current[p.id] = el;
+              }}
+              onClick={() => onSelectParcel(p.id)}
+              className={`block min-h-[64px] w-full p-3.5 text-left transition-colors ${
+                selected
+                  ? "bg-blue-50/90 ring-1 ring-inset ring-blue-500/30"
+                  : aiMatched
+                    ? "bg-sky-50/80 ring-1 ring-inset ring-sky-400/40 active:bg-sky-100/70"
+                    : matchSet
+                      ? "opacity-65 active:bg-slate-50"
+                      : "active:bg-slate-50"
+              }`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                  <span className="font-mono text-sm font-bold text-slate-900">
+                    {p.parcel_code}
+                  </span>
+                  {aiMatched && (
+                    <span className="inline-flex items-center gap-0.5 rounded-full bg-sky-600 px-1.5 py-0.5 text-[9px] font-semibold text-white">
+                      <Sparkles className="h-2.5 w-2.5" /> AI
+                    </span>
+                  )}
+                </div>
+                <LegalStatusBadge status={p.legal_status} />
+              </div>
+
+              <p className="mt-1 truncate text-xs font-medium text-slate-700">
+                {p.name ?? "-"} · {p.desa_kelurahan ?? "-"}
+              </p>
+              <p className="mt-0.5 truncate text-[11px] text-slate-500">
+                Pemilik: {p.current_owner_name ?? "-"} · {p.document_count} Dok
+              </p>
+
+              <div className="mt-2 grid grid-cols-2 gap-2 rounded-lg border border-slate-200/80 bg-slate-50/80 px-2.5 py-1.5 text-[11px]">
+                <div>
+                  <span className="block text-[10px] font-medium uppercase tracking-wider text-slate-400">
+                    Luas Surat
+                  </span>
+                  <span className="font-semibold tabular-nums text-slate-800">
+                    {formatArea(p.area_m2)}
+                  </span>
+                </div>
+                <div>
+                  <span className="block text-[10px] font-medium uppercase tracking-wider text-slate-400">
+                    Luas GIS
+                  </span>
+                  <span className="font-semibold tabular-nums text-slate-800">
+                    {formatArea(p.gis_area_m2)}
+                  </span>
+                  {Math.abs(discrepancy) > 0.5 && (
+                    <span className="ml-1 font-medium text-amber-600">
+                      (Δ {formatArea(discrepancy)})
+                    </span>
+                  )}
+                </div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      <table className="hidden w-full text-left text-xs md:table">
       <thead className="sticky top-0 z-10 border-b border-slate-200 bg-slate-50 text-[11px] font-semibold uppercase tracking-wider text-slate-600">
         <tr>
           <th className="px-3 py-2.5">Kode Persil</th>
@@ -126,5 +204,6 @@ export default function ParcelTable({
         })}
       </tbody>
     </table>
+    </>
   );
 }
