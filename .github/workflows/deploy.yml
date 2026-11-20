@@ -1,0 +1,37 @@
+name: Deploy LDKH GIS Frontend
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Sync code to /opt/rb-gis/frontend
+        run: |
+          rsync -av --delete \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude 'node_modules' \
+            --exclude '.next' \
+            --exclude '.env' \
+            --exclude '.env.local' \
+            ./ /opt/rb-gis/frontend/
+
+      - name: Install dependencies & build Next.js
+        run: |
+          cd /opt/rb-gis/frontend
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Restart ldkh-frontend service
+        run: |
+          sudo /bin/systemctl restart ldkh-frontend.service
+          sleep 3
+          sudo /bin/systemctl is-active ldkh-frontend.service
+          curl -fsSI http://127.0.0.1:3000 | head -n 1
