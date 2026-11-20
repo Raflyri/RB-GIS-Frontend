@@ -33,5 +33,5 @@ jobs:
         run: |
           sudo /bin/systemctl restart ldkh-frontend.service
           sleep 3
-          sudo /bin/systemctl is-active ldkh-frontend.service
+          systemctl is-active ldkh-frontend.service
           curl -fsSI http://127.0.0.1:3000 | head -n 1
