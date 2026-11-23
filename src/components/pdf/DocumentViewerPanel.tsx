@@ -4,6 +4,7 @@ import { FileSearch, FileText, Loader2, RefreshCw, Upload, X } from "lucide-reac
 import { useCallback, useEffect, useState } from "react";
 
 import OcrReviewPanel from "@/components/ocr/OcrReviewPanel";
+import GuestCanvasPdfViewer from "@/components/pdf/GuestCanvasPdfViewer";
 import { LegalStatusBadge, VerificationBadge } from "@/components/ui/Badges";
 import { fetchDocumentDetail, fetchSignedPdfUrl, replaceDocumentPdf } from "@/lib/api";
 import type { DocumentDetailRead, UserRead } from "@/lib/types";
@@ -92,6 +93,8 @@ export default function DocumentViewerPanel({
     }
   };
 
+  const isGuest = currentUser.role === "GUEST";
+
   return (
     <aside className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
       <header className="flex items-start justify-between gap-2 border-b border-slate-200 bg-slate-50/70 px-4 py-3">
@@ -126,10 +129,12 @@ export default function DocumentViewerPanel({
 
       <nav className="flex flex-wrap items-center gap-1 border-b border-slate-200 bg-slate-50/50 px-3 pt-2 text-xs">
         {(
-          [
-            ["pdf", "PDF Viewer", FileText],
-            ["ocr", "Verifikasi OCR (HITL)", FileSearch],
-          ] as const
+          isGuest
+            ? ([["pdf", "PDF Viewer (Read-Only)", FileText]] as const)
+            : ([
+                ["pdf", "PDF Viewer", FileText],
+                ["ocr", "Verifikasi OCR (HITL)", FileSearch],
+              ] as const)
         ).map(([key, label, Icon]) => (
           <button
             key={key}
@@ -202,14 +207,22 @@ export default function DocumentViewerPanel({
           <p className="p-4 text-sm text-red-600">Gagal memuat dokumen: {error}</p>
         )}
         {!loading && !error && tab === "pdf" && pdfUrl && (
-          <iframe
-            key={pdfUrl}
-            src={pdfUrl}
-            title={`PDF ${document?.document_number ?? ""}`}
-            className="h-full w-full bg-slate-100"
-          />
+          isGuest ? (
+            <GuestCanvasPdfViewer
+              pdfUrl={pdfUrl}
+              currentUser={currentUser}
+              onClose={onClose}
+            />
+          ) : (
+            <iframe
+              key={pdfUrl}
+              src={pdfUrl}
+              title={`PDF ${document?.document_number ?? ""}`}
+              className="h-full w-full bg-slate-100"
+            />
+          )
         )}
-        {!loading && !error && tab === "ocr" && document && (
+        {!loading && !error && tab === "ocr" && document && !isGuest && (
           <OcrReviewPanel
             document={document}
             currentUser={currentUser}
@@ -219,7 +232,7 @@ export default function DocumentViewerPanel({
         )}
       </div>
 
-      {document && (
+      {document && !isGuest && (
         <footer className="truncate border-t border-slate-200 bg-slate-50 px-4 py-2 font-mono text-[10px] text-slate-500">
           /mnt/synology/LDKH-Documents/{document.synology_file_path}
         </footer>

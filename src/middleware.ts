@@ -12,6 +12,14 @@ export function middleware(request: NextRequest) {
     );
   }
 
+  // Blokir akses publik ke endpoint internal Hermes (hanya boleh via ZeroTier ke backend)
+  if (request.nextUrl.pathname.startsWith("/api/v1/auth/guest/hermes")) {
+    return new NextResponse(
+      "Akses ke endpoint internal Hermes melalui jaringan publik ditolak.",
+      { status: 403 },
+    );
+  }
+
   // Teruskan penanda proxy internal saat Next.js me-rewrite /api/* ke FastAPI Backend
   if (request.nextUrl.pathname.startsWith("/api")) {
     const requestHeaders = new Headers(request.headers);

@@ -808,6 +808,8 @@ export default function ParcelMap({
   const onFocusModeChangeRef = useRef(onFocusModeChange);
   const undoDrawVertexRef = useRef<(() => void) | null>(null);
   const dataRef = useRef<ParcelFeatureCollection | null>(data);
+  const canEditRef = useRef<boolean>(canEdit);
+  canEditRef.current = canEdit;
   const importPreviewRef = useRef<ParcelImportFeaturePreview[] | null>(importPreviewFeatures);
   const didFitRef = useRef(false);
 
@@ -1235,10 +1237,12 @@ export default function ParcelMap({
       const baseDrawPolygon = MapboxDraw.modes?.draw_polygon;
       const draw = new MapboxDraw({
         displayControlsDefault: false,
-        controls: {
-          polygon: true,
-          trash: true,
-        },
+        controls: canEditRef.current
+          ? {
+              polygon: true,
+              trash: true,
+            }
+          : {},
         defaultMode: "simple_select",
         ...(baseDrawPolygon
           ? {
@@ -2015,7 +2019,7 @@ export default function ParcelMap({
     <div
       className={`ldkh-map-canvas relative h-full w-full ${
         isFocusMode ? "ldkh-map-focus" : ""
-      }`}
+      } ${!canEdit ? "ldkh-readonly-map" : ""}`}
     >
       <div ref={containerRef} className="h-full w-full" />
 

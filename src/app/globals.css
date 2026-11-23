@@ -62,3 +62,14 @@ body {
     transition: right 300ms ease-out;
   }
 }
+
+@media print {
+  .guest-pdf-protected {
+    display: none !important;
+  }
+}
+
+.ldkh-readonly-map .mapbox-gl-draw_ctrl-draw-btn,
+.ldkh-readonly-map .mapbox-gl-draw_trash {
+  display: none !important;
+}

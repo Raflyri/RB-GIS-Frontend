@@ -113,124 +113,136 @@ export default function OcrReviewPanel({
         </details>
       )}
 
-      <label className="space-y-1">
-        <span className="flex items-center justify-between font-medium text-slate-700">
-          Teks OCR mentah (koreksi tulisan pudar / tangan)
-        </span>
-        <textarea
-          value={rawText}
-          onChange={(e) => setRawText(e.target.value)}
-          rows={4}
-          className="w-full rounded-lg border border-slate-300 bg-white p-2 font-mono text-[11px] text-slate-800 shadow-sm focus:border-blue-500 focus:outline-none"
-        />
-      </label>
+      {!canEdit ? (
+        <div className="space-y-3">
+          <p className="rounded-lg border border-slate-200 bg-slate-50 p-2.5 text-slate-600">
+            Mode <strong>Read-Only</strong>: aksi koreksi dan verifikasi OCR dinonaktifkan.
+          </p>
+          {ocr?.reviewed_json && (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <p className="mb-1 font-semibold text-slate-700">Ringkasan Data Terverifikasi</p>
+              <pre className="max-h-60 overflow-auto font-mono text-[11px] text-slate-700">
+                {pretty(ocr.reviewed_json)}
+              </pre>
+            </div>
+          )}
+        </div>
+      ) : (
+        <>
+          <label className="space-y-1">
+            <span className="flex items-center justify-between font-medium text-slate-700">
+              Teks OCR mentah (koreksi tulisan pudar / tangan)
+            </span>
+            <textarea
+              value={rawText}
+              onChange={(e) => setRawText(e.target.value)}
+              rows={4}
+              className="w-full rounded-lg border border-slate-300 bg-white p-2 font-mono text-[11px] text-slate-800 shadow-sm focus:border-blue-500 focus:outline-none"
+            />
+          </label>
 
-      <label className="space-y-1">
-        <span className="flex items-center justify-between font-medium text-slate-700">
-          Data terstruktur hasil review (reviewed_json)
+          <label className="space-y-1">
+            <span className="flex items-center justify-between font-medium text-slate-700">
+              Data terstruktur hasil review (reviewed_json)
+              <button
+                type="button"
+                onClick={() => setJsonText(initialJson)}
+                className="inline-flex items-center gap-1 text-[11px] text-slate-500 hover:text-blue-600"
+              >
+                <RotateCcw className="h-3 w-3" /> Reset
+              </button>
+            </span>
+            <textarea
+              value={jsonText}
+              onChange={(e) => setJsonText(e.target.value)}
+              rows={10}
+              spellCheck={false}
+              className={`w-full rounded-lg border bg-white p-2 font-mono text-[11px] text-slate-800 shadow-sm focus:outline-none ${
+                jsonError ? "border-red-500" : "border-slate-300 focus:border-blue-500"
+              }`}
+            />
+            {jsonError ? (
+              <span className="text-red-600">{jsonError}</span>
+            ) : (
+              <span className="text-slate-500">
+                Field yang disinkronkan ke dokumen: <code>document_number</code>,{" "}
+                <code>title</code>, <code>issuing_office</code>, <code>legal_status</code>,{" "}
+                <code>area_value</code> + <code>area_unit</code> (otomatis dinormalisasi ke m²).
+              </span>
+            )}
+          </label>
+
+          <div className="grid grid-cols-2 gap-2.5">
+            <label className="space-y-1">
+              <span className="font-medium text-slate-700">Status verifikasi</span>
+              <select
+                value={status}
+                onChange={(e) => setStatus(e.target.value as VerificationStatus)}
+                className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-800 shadow-sm focus:border-blue-500 focus:outline-none"
+              >
+                <option value="VERIFIED">VERIFIED — data valid</option>
+                <option value="NEEDS_REVIEW">NEEDS_REVIEW — perlu cek lanjutan</option>
+                <option value="DRAFT_AI">DRAFT_AI — kembalikan ke draft</option>
+              </select>
+            </label>
+            <label className="space-y-1">
+              <span className="font-medium text-slate-700">Reviewer (Otomatis dari Sesi Login)</span>
+              <input
+                value={reviewerIdentity}
+                readOnly
+                className="w-full cursor-not-allowed rounded-lg border border-slate-200 bg-slate-100 p-2 text-slate-600 shadow-sm outline-none"
+              />
+            </label>
+          </div>
+
+          <label className="space-y-1">
+            <span className="font-medium text-slate-700">Catatan review</span>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              rows={2}
+              className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-800 shadow-sm focus:border-blue-500 focus:outline-none"
+            />
+          </label>
+
+          <label className="flex items-center gap-2 text-slate-700">
+            <input
+              type="checkbox"
+              checked={syncToDocument}
+              onChange={(e) => setSyncToDocument(e.target.checked)}
+              className="accent-blue-600"
+            />
+            Sinkronkan field terverifikasi ke metadata dokumen
+          </label>
+
+          {message && (
+            <p
+              className={`flex items-center gap-1.5 rounded-lg border p-2.5 ${
+                message.kind === "ok"
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                  : "border-red-200 bg-red-50 text-red-700"
+              }`}
+            >
+              {message.kind === "ok" ? (
+                <CheckCircle2 className="h-4 w-4" />
+              ) : (
+                <AlertTriangle className="h-4 w-4" />
+              )}
+              {message.text}
+            </p>
+          )}
+
           <button
             type="button"
-            onClick={() => setJsonText(initialJson)}
-            className="inline-flex items-center gap-1 text-[11px] text-slate-500 hover:text-blue-600"
+            onClick={handleSubmit}
+            disabled={saving || !!jsonError}
+            className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 font-medium text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <RotateCcw className="h-3 w-3" /> Reset
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+            Simpan Hasil Review
           </button>
-        </span>
-        <textarea
-          value={jsonText}
-          onChange={(e) => setJsonText(e.target.value)}
-          rows={10}
-          spellCheck={false}
-          className={`w-full rounded-lg border bg-white p-2 font-mono text-[11px] text-slate-800 shadow-sm focus:outline-none ${
-            jsonError ? "border-red-500" : "border-slate-300 focus:border-blue-500"
-          }`}
-        />
-        {jsonError ? (
-          <span className="text-red-600">{jsonError}</span>
-        ) : (
-          <span className="text-slate-500">
-            Field yang disinkronkan ke dokumen: <code>document_number</code>,{" "}
-            <code>title</code>, <code>issuing_office</code>, <code>legal_status</code>,{" "}
-            <code>area_value</code> + <code>area_unit</code> (otomatis dinormalisasi ke m²).
-          </span>
-        )}
-      </label>
-
-      <div className="grid grid-cols-2 gap-2.5">
-        <label className="space-y-1">
-          <span className="font-medium text-slate-700">Status verifikasi</span>
-          <select
-            value={status}
-            onChange={(e) => setStatus(e.target.value as VerificationStatus)}
-            className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-800 shadow-sm focus:border-blue-500 focus:outline-none"
-          >
-            <option value="VERIFIED">VERIFIED — data valid</option>
-            <option value="NEEDS_REVIEW">NEEDS_REVIEW — perlu cek lanjutan</option>
-            <option value="DRAFT_AI">DRAFT_AI — kembalikan ke draft</option>
-          </select>
-        </label>
-        <label className="space-y-1">
-          <span className="font-medium text-slate-700">Reviewer (Otomatis dari Sesi Login)</span>
-          <input
-            value={reviewerIdentity}
-            readOnly
-            className="w-full cursor-not-allowed rounded-lg border border-slate-200 bg-slate-100 p-2 text-slate-600 shadow-sm outline-none"
-          />
-        </label>
-      </div>
-
-      <label className="space-y-1">
-        <span className="font-medium text-slate-700">Catatan review</span>
-        <textarea
-          value={notes}
-          onChange={(e) => setNotes(e.target.value)}
-          rows={2}
-          className="w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-800 shadow-sm focus:border-blue-500 focus:outline-none"
-        />
-      </label>
-
-      <label className="flex items-center gap-2 text-slate-700">
-        <input
-          type="checkbox"
-          checked={syncToDocument}
-          onChange={(e) => setSyncToDocument(e.target.checked)}
-          className="accent-blue-600"
-        />
-        Sinkronkan field terverifikasi ke metadata dokumen
-      </label>
-
-      {message && (
-        <p
-          className={`flex items-center gap-1.5 rounded-lg border p-2.5 ${
-            message.kind === "ok"
-              ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-              : "border-red-200 bg-red-50 text-red-700"
-          }`}
-        >
-          {message.kind === "ok" ? (
-            <CheckCircle2 className="h-4 w-4" />
-          ) : (
-            <AlertTriangle className="h-4 w-4" />
-          )}
-          {message.text}
-        </p>
+        </>
       )}
-
-      {!canEdit && (
-        <p className="rounded-lg border border-slate-200 bg-slate-50 p-2.5 text-slate-600">
-          Akun Anda memiliki peran <strong>VIEWER</strong> (hanya baca) dan tidak dapat memverifikasi OCR.
-        </p>
-      )}
-
-      <button
-        type="button"
-        onClick={handleSubmit}
-        disabled={saving || !!jsonError || !canEdit}
-        className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 font-medium text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
-      >
-        {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-        Simpan Hasil Review
-      </button>
     </div>
   );
 }

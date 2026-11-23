@@ -7,7 +7,14 @@ export type LegalStatus =
 
 export type VerificationStatus = "DRAFT_AI" | "NEEDS_REVIEW" | "VERIFIED";
 
-export type UserRole = "ADMIN" | "AUDITOR" | "VIEWER";
+export type UserRole = "ADMIN" | "AUDITOR" | "VIEWER" | "GUEST";
+
+export type GuestRequestStatus =
+  | "PENDING"
+  | "APPROVED"
+  | "REJECTED"
+  | "EXPIRED"
+  | "REVOKED";
 
 export type OwnerType =
   | "INDIVIDU"
@@ -23,6 +30,10 @@ export interface UserRead {
   role: UserRole;
   is_active: boolean;
   created_at: string;
+  short_code?: string | null;
+  session_expires_at?: string | null;
+  ip_address?: string | null;
+  device_summary?: string | null;
 }
 
 export interface TokenResponse {
@@ -30,6 +41,46 @@ export interface TokenResponse {
   token_type: string;
   expires_in_seconds: number;
   user: UserRead;
+}
+
+export interface GuestAccessRequestResponse {
+  short_code: string;
+  wait_token: string;
+  status: GuestRequestStatus;
+  request_expires_at: string;
+  requested_at_wib: string;
+  device_summary: string;
+  ip_address: string;
+}
+
+export interface GuestAccessStatusResponse {
+  status: GuestRequestStatus;
+  short_code: string;
+  request_expires_at: string;
+  decided_at: string | null;
+}
+
+export interface GuestApprovalDetailResponse {
+  short_code: string;
+  guest_name: string | null;
+  device_summary: string;
+  ip_address: string;
+  requested_at: string;
+  requested_at_wib: string;
+  request_expires_at: string;
+  remaining_seconds: number;
+  status: GuestRequestStatus;
+  decided_at: string | null;
+  decided_via: string | null;
+  is_actionable: boolean;
+}
+
+export interface GuestApprovalActionResponse {
+  short_code: string;
+  status: GuestRequestStatus;
+  decided_at: string;
+  decided_via: string;
+  message: string;
 }
 
 export type DocumentType =

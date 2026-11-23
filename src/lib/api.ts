@@ -4,6 +4,10 @@ import type {
   DocumentDetailRead,
   DocumentRead,
   DocumentUploadPayload,
+  GuestAccessRequestResponse,
+  GuestAccessStatusResponse,
+  GuestApprovalActionResponse,
+  GuestApprovalDetailResponse,
   LegalStatus,
   OcrRawDataRead,
   OcrVerifyPayload,
@@ -31,9 +35,11 @@ const ACCESS_TOKEN_STORAGE_KEY = "ldkh_gis_access_token";
 
 export class ApiError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  code?: string;
+  constructor(message: string, status: number, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -103,7 +109,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       setStoredToken(null);
     }
     const detail = await parseErrorDetail(response);
-    throw new ApiError(detail, response.status);
+    const headerCode = response.headers.get("X-Error-Code") || undefined;
+    const inferredCode =
+      headerCode ||
+      (detail.includes("GUEST_SESSION_EXPIRED")
+        ? "GUEST_SESSION_EXPIRED"
+        : undefined);
+    throw new ApiError(detail, response.status, inferredCode);
   }
 
   if (response.status === 204) {
@@ -137,6 +149,45 @@ export const logoutSession = async () => {
 };
 
 export const fetchCurrentUser = () => request<UserRead>("/auth/me");
+
+export const requestGuestAccess = (guestName?: string) =>
+  request<GuestAccessRequestResponse>("/auth/guest/request", {
+    method: "POST",
+    body: JSON.stringify({
+      guest_name: guestName?.trim() ? guestName.trim() : null,
+    }),
+  });
+
+export const fetchGuestAccessStatus = (waitToken: string) =>
+  request<GuestAccessStatusResponse>(
+    `/auth/guest/status?wait_token=${encodeURIComponent(waitToken)}`,
+  );
+
+export const exchangeGuestToken = async (waitToken: string) => {
+  const data = await request<TokenResponse>("/auth/guest/exchange", {
+    method: "POST",
+    body: JSON.stringify({ wait_token: waitToken }),
+  });
+  setStoredToken(data.access_token);
+  return data;
+};
+
+export const fetchGuestApprovalDetail = (confirmToken: string) =>
+  request<GuestApprovalDetailResponse>(
+    `/auth/guest/approval/${encodeURIComponent(confirmToken)}`,
+  );
+
+export const submitGuestApprovalDecision = (
+  confirmToken: string,
+  action: "APPROVE" | "REJECT",
+) =>
+  request<GuestApprovalActionResponse>(
+    `/auth/guest/approval/${encodeURIComponent(confirmToken)}`,
+    {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    },
+  );
 
 export const fetchBackendHealth = () => request<HealthResponse>("/health");
 

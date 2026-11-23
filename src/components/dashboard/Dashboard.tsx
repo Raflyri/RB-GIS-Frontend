@@ -3,6 +3,7 @@
 import {
   ChevronLeft,
   ChevronRight,
+  Clock,
   FileWarning,
   Layers,
   Loader2,
@@ -16,6 +17,7 @@ import {
   X,
 } from "lucide-react";
 import dynamic from "next/dynamic";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
 
 import LoginPage from "@/components/auth/LoginPage";
@@ -79,10 +81,20 @@ interface UploadModalTarget {
   defaultLegalStatus: LegalStatus;
 }
 
+function formatHMS(totalSeconds: number): string {
+  const clamped = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(clamped / 3600);
+  const mins = Math.floor((clamped % 3600) / 60);
+  const secs = clamped % 60;
+  return `${String(hours).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+}
+
 export default function Dashboard() {
+  const router = useRouter();
   const [currentUser, setCurrentUser] = useState<UserRead | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [guestRemainingSeconds, setGuestRemainingSeconds] = useState<number | null>(null);
 
   const [statusFilter, setStatusFilter] = useState<LegalStatus | null>(null);
   const [searchInput, setSearchInput] = useState("");
@@ -121,14 +133,50 @@ export default function Dashboard() {
   const [tabletDrawerOpen, setTabletDrawerOpen] = useState(true);
   const [isMapFocusMode, setIsMapFocusMode] = useState(false);
 
-  const handleApiFailure = useCallback((err: unknown, setter: (msg: string) => void) => {
-    if (err instanceof ApiError && err.status === 401) {
-      setCurrentUser(null);
-      setAuthError("Sesi login Anda telah berakhir. Silakan masuk kembali.");
-      return;
-    }
-    setter((err as Error).message);
+  const clearLocalSessionState = useCallback(() => {
+    setCurrentUser(null);
+    setGuestRemainingSeconds(null);
+    setGeojson(null);
+    setAllParcels(null);
+    setOrphaned([]);
+    setStats(null);
+    setEditingGeometryParcel(null);
+    setEditModalOpen(false);
+    setImportModalOpen(false);
+    setImportPreviewFeatures(null);
+    setSelectedParcelId(null);
+    setParcelDetail(null);
+    setActiveDocumentId(null);
+    setAiResult(null);
+    setMobileAiOpen(false);
+    setMobileProfileOpen(false);
+    setMobileSheetSnap("peek");
   }, []);
+
+  const triggerGuestSessionExpired = useCallback(async () => {
+    await logoutSession().catch(() => undefined);
+    clearLocalSessionState();
+    setAuthError(
+      "Sesi akses Guest 3 jam telah berakhir. Silakan ajukan permintaan masuk kembali.",
+    );
+    router.replace("/login?reason=guest_expired");
+  }, [clearLocalSessionState, router]);
+
+  const handleApiFailure = useCallback(
+    (err: unknown, setter: (msg: string) => void) => {
+      if (err instanceof ApiError && err.status === 401) {
+        if (err.code === "GUEST_SESSION_EXPIRED" || currentUser?.role === "GUEST") {
+          void triggerGuestSessionExpired();
+          return;
+        }
+        clearLocalSessionState();
+        setAuthError("Sesi login Anda telah berakhir. Silakan masuk kembali.");
+        return;
+      }
+      setter((err as Error).message);
+    },
+    [clearLocalSessionState, currentUser?.role, triggerGuestSessionExpired],
+  );
 
   useEffect(() => {
     let active = true;
@@ -152,6 +200,45 @@ export default function Dashboard() {
       active = false;
     };
   }, []);
+
+  // Hitung mundur 3 jam sesi Guest & cek pencabutan sesi (REVOKE) secara berkala
+  useEffect(() => {
+    if (!currentUser || currentUser.role !== "GUEST") {
+      setGuestRemainingSeconds(null);
+      return;
+    }
+
+    const expiresAtMs = currentUser.session_expires_at
+      ? new Date(currentUser.session_expires_at).getTime()
+      : null;
+
+    if (expiresAtMs) {
+      const updateTimer = () => {
+        const diffSec = Math.max(0, Math.floor((expiresAtMs - Date.now()) / 1000));
+        setGuestRemainingSeconds(diffSec);
+        if (diffSec <= 0) {
+          void triggerGuestSessionExpired();
+        }
+      };
+      updateTimer();
+      const countdownTimer = setInterval(updateTimer, 1000);
+
+      const sessionHeartbeat = setInterval(() => {
+        fetchCurrentUser().catch((err: unknown) => {
+          if (err instanceof ApiError && err.status === 401) {
+            void triggerGuestSessionExpired();
+          }
+        });
+      }, 30_000);
+
+      return () => {
+        clearInterval(countdownTimer);
+        clearInterval(sessionHeartbeat);
+      };
+    }
+
+    return undefined;
+  }, [currentUser, triggerGuestSessionExpired]);
 
   const startResize = useCallback(
     (kind: "sidebar" | "viewer", event: ReactMouseEvent<HTMLDivElement>) => {
@@ -389,23 +476,8 @@ export default function Dashboard() {
 
   const handleLogout = useCallback(async () => {
     await logoutSession();
-    setCurrentUser(null);
-    setGeojson(null);
-    setAllParcels(null);
-    setOrphaned([]);
-    setStats(null);
-    setEditingGeometryParcel(null);
-    setEditModalOpen(false);
-    setImportModalOpen(false);
-    setImportPreviewFeatures(null);
-    setSelectedParcelId(null);
-    setParcelDetail(null);
-    setActiveDocumentId(null);
-    setAiResult(null);
-    setMobileAiOpen(false);
-    setMobileProfileOpen(false);
-    setMobileSheetSnap("peek");
-  }, []);
+    clearLocalSessionState();
+  }, [clearLocalSessionState]);
 
   const highlightedParcelIds = useMemo(
     () => (aiResult ? aiResult.parcel_ids : null),
@@ -440,17 +512,21 @@ export default function Dashboard() {
     );
   }
 
-  const canEdit = currentUser.role === "ADMIN" || currentUser.role === "AUDITOR";
-  const canDelete = currentUser.role === "ADMIN";
+  const isGuest = currentUser.role === "GUEST";
+  const isAdmin = currentUser.role === "ADMIN";
+  const canEdit = isAdmin;
+  const canDelete = isAdmin;
   const isEditingSelectedGeometry =
     editingGeometryParcel?.id === parcelDetail?.id && Boolean(parcelDetail);
 
-  const userInitials = currentUser.full_name
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase() ?? "")
-    .join("") || "U";
+  const userInitials = isGuest
+    ? "G"
+    : currentUser.full_name
+        .split(/\s+/)
+        .filter(Boolean)
+        .slice(0, 2)
+        .map((part) => part[0]?.toUpperCase() ?? "")
+        .join("") || "U";
 
   const handleOpenPrimaryPdf = () => {
     const primaryDocId =
@@ -683,6 +759,18 @@ export default function Dashboard() {
         </div>
 
         <div className="flex items-center gap-2">
+          {isGuest && guestRemainingSeconds !== null && (
+            <div
+              role="status"
+              className="inline-flex items-center gap-1.5 rounded-full border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-800 shadow-sm"
+            >
+              <Clock className="h-3.5 w-3.5 text-amber-600" />
+              <span className="tabular-nums">
+                Mode Guest (Read-Only) · Sisa {formatHMS(guestRemainingSeconds)}
+              </span>
+            </div>
+          )}
+
           <PwaInstallControl variant="header" />
 
           <button
@@ -766,9 +854,20 @@ export default function Dashboard() {
           />
         </section>
 
-        {/* Mobile (< 768px): Floating Search Pill + Horizontal Scrollable Status Chips */}
+        {/* Mobile (< 768px): Floating Search Pill + Guest Banner + Horizontal Scrollable Status Chips */}
         {!isMapFocusMode && (
           <div className="pointer-events-none fixed inset-x-0 top-0 z-20 flex flex-col gap-2 px-3 pt-[calc(env(safe-area-inset-top,0px)+0.625rem)] md:hidden">
+            {isGuest && guestRemainingSeconds !== null && (
+              <div
+                role="status"
+                className="pointer-events-auto mx-auto inline-flex max-w-full items-center gap-1.5 rounded-full border border-amber-300 bg-amber-50/95 px-3 py-1 text-[11px] font-semibold text-amber-800 shadow-md backdrop-blur-md"
+              >
+                <Clock className="h-3 w-3 shrink-0 text-amber-600" />
+                <span className="truncate tabular-nums">
+                  Mode Guest (Read-Only) · Sisa {formatHMS(guestRemainingSeconds)}
+                </span>
+              </div>
+            )}
             <div className="pointer-events-auto flex min-h-[46px] items-center gap-1.5 rounded-full border border-slate-200/90 bg-white/95 pl-3.5 pr-1.5 shadow-lg backdrop-blur-md">
               <Search className="h-4 w-4 shrink-0 text-slate-400" />
               <input
