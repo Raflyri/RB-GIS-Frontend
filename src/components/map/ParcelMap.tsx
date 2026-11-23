@@ -795,6 +795,14 @@ export default function ParcelMap({
   const editingParcelIdRef = useRef<string | null>(null);
   const highlightedIdsRef = useRef<string[] | null>(highlightedParcelIds);
   const isDrawingRef = useRef(false);
+  const isUnlockedOverlayRef = useRef(false);
+  const touchStartRef = useRef<{
+    x: number;
+    y: number;
+    time: number;
+    cancelled: boolean;
+  } | null>(null);
+  const lastTouchTapAtRef = useRef<number>(0);
   const onSelectRef = useRef(onSelectParcel);
   const onPolygonDrawnRef = useRef(onPolygonDrawn);
   const onFocusModeChangeRef = useRef(onFocusModeChange);
@@ -857,6 +865,7 @@ export default function ParcelMap({
 
   const isFocusMode =
     isDrawing || Boolean(editingParcel) || (Boolean(overlayImage) && !overlayLocked);
+  isUnlockedOverlayRef.current = Boolean(overlayImage) && !overlayLocked;
 
   useEffect(() => {
     onFocusModeChangeRef.current?.(isFocusMode);
@@ -932,15 +941,24 @@ export default function ParcelMap({
         type: "line",
         source: SOURCE_ID,
         paint: {
-          "line-color": "#0EA5E9",
+          "line-color": [
+            "case",
+            ["boolean", ["feature-state", "selected"], false],
+            "#FFFFFF",
+            "#0EA5E9",
+          ],
           "line-width": [
             "case",
+            ["boolean", ["feature-state", "selected"], false],
+            7,
             ["boolean", ["feature-state", "aiMatch"], false],
             7,
             0,
           ],
           "line-opacity": [
             "case",
+            ["boolean", ["feature-state", "selected"], false],
+            0.85,
             ["boolean", ["feature-state", "aiMatch"], false],
             0.5,
             0,
@@ -1116,12 +1134,84 @@ export default function ParcelMap({
         }
       });
 
-      // onClick poligon -> buka sidebar detail tanah (nonaktif saat mode digitasi / edit poligon).
+      const queryParcelAtPoint = (point: { x: number; y: number }): string | null => {
+        let hits = map.queryRenderedFeatures([point.x, point.y], {
+          layers: [FILL_LAYER],
+        });
+        if (!hits.length) {
+          const bbox: [maplibregl.PointLike, maplibregl.PointLike] = [
+            [point.x - 12, point.y - 12],
+            [point.x + 12, point.y + 12],
+          ];
+          hits = map.queryRenderedFeatures(bbox, { layers: [FILL_LAYER] });
+        }
+        const clicked = hits[0];
+        return clicked ? String(clicked.properties?.id ?? clicked.id) : null;
+      };
+
+      // Touch tap handler eksplisit (menghindari blokir preventDefault() milik MapboxDraw pada layar sentuh).
+      map.on("touchstart", (e) => {
+        if (e.originalEvent.touches.length !== 1) {
+          if (touchStartRef.current) {
+            touchStartRef.current.cancelled = true;
+          }
+          return;
+        }
+        touchStartRef.current = {
+          x: e.point.x,
+          y: e.point.y,
+          time: performance.now(),
+          cancelled: false,
+        };
+      });
+
+      map.on("touchmove", (e) => {
+        const start = touchStartRef.current;
+        if (!start || start.cancelled) return;
+        if (e.originalEvent.touches.length !== 1) {
+          start.cancelled = true;
+          return;
+        }
+        const dist = Math.hypot(e.point.x - start.x, e.point.y - start.y);
+        if (dist >= 8) {
+          start.cancelled = true;
+        }
+      });
+
+      map.on("touchend", (e) => {
+        const start = touchStartRef.current;
+        touchStartRef.current = null;
+        if (!start || start.cancelled) return;
+        if (
+          isDrawingRef.current ||
+          editingParcelIdRef.current !== null ||
+          isUnlockedOverlayRef.current
+        ) {
+          return;
+        }
+        const dist = Math.hypot(e.point.x - start.x, e.point.y - start.y);
+        const elapsed = performance.now() - start.time;
+        if (dist < 8 && elapsed < 500) {
+          lastTouchTapAtRef.current = performance.now();
+          onSelectRef.current(queryParcelAtPoint(e.point));
+        }
+      });
+
+      map.on("touchcancel", () => {
+        touchStartRef.current = null;
+      });
+
+      // onClick poligon (desktop) -> buka sidebar detail tanah (nonaktif saat mode digitasi / edit poligon / overlay aktif).
       map.on("click", (e) => {
-        if (isDrawingRef.current || editingParcelIdRef.current !== null) return;
-        const features = map.queryRenderedFeatures(e.point, { layers: [FILL_LAYER] });
-        const clicked = features[0];
-        onSelectRef.current(clicked ? String(clicked.properties?.id ?? clicked.id) : null);
+        if (performance.now() - lastTouchTapAtRef.current < 450) return;
+        if (
+          isDrawingRef.current ||
+          editingParcelIdRef.current !== null ||
+          isUnlockedOverlayRef.current
+        ) {
+          return;
+        }
+        onSelectRef.current(queryParcelAtPoint(e.point));
       });
 
       // Konfigurasi kelas kontrol agar @mapbox/mapbox-gl-draw kompatibel dengan MapLibre GL JS.
@@ -1406,7 +1496,17 @@ export default function ParcelMap({
     );
     const bounds = feature ? geometryBounds(feature.geometry) : null;
     if (bounds) {
-      map.fitBounds(bounds, { padding: 120, maxZoom: 18, duration: 800 });
+      const isMobileViewport =
+        typeof window !== "undefined" && window.innerWidth < 768;
+      const fitPadding = isMobileViewport
+        ? {
+            top: 120,
+            bottom: Math.round((window.innerHeight || 760) * 0.48),
+            left: 40,
+            right: 40,
+          }
+        : 120;
+      map.fitBounds(bounds, { padding: fitPadding, maxZoom: 18, duration: 800 });
     }
   }, [selectedParcelId]);
 
@@ -2275,19 +2375,19 @@ export default function ParcelMap({
       {/* Indikator Live GPS Lapangan: akurasi + deteksi Point-in-Polygon + salin koordinat */}
       {gpsState === "tracking" && gpsPosition && (
         <div
-          className={`pointer-events-auto absolute left-3 right-16 z-10 flex max-w-md flex-wrap items-center gap-1.5 md:right-auto md:bottom-[5.5rem] ${
+          className={`pointer-events-none absolute left-3 right-16 z-10 flex max-w-md flex-wrap items-center gap-1.5 md:right-auto md:bottom-[5.5rem] ${
             isFocusMode
               ? "bottom-[calc(env(safe-area-inset-bottom,0px)+5.25rem)]"
               : "bottom-[calc(env(safe-area-inset-bottom,0px)+14.5dvh+5.35rem)]"
           }`}
         >
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-blue-200 bg-white/95 px-2.5 py-1 text-[11px] font-semibold tabular-nums text-blue-700 shadow-md backdrop-blur-sm">
+          <span className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-blue-200 bg-white/95 px-2.5 py-1 text-[11px] font-semibold tabular-nums text-blue-700 shadow-md backdrop-blur-sm">
             <span className="h-2 w-2 animate-pulse rounded-full bg-blue-600" />
             GPS ±{Math.max(1, Math.round(gpsPosition.accuracy))} m
           </span>
 
           {matchedGpsParcel ? (
-            <div className="inline-flex flex-wrap items-center gap-1 rounded-full border border-emerald-400 bg-emerald-600 p-0.5 pl-2.5 text-[11px] font-semibold text-white shadow-md">
+            <div className="pointer-events-auto inline-flex flex-wrap items-center gap-1 rounded-full border border-emerald-400 bg-emerald-600 p-0.5 pl-2.5 text-[11px] font-semibold text-white shadow-md">
               <button
                 type="button"
                 onClick={() => onSelectParcel(matchedGpsParcel.properties.id)}
@@ -2316,7 +2416,7 @@ export default function ParcelMap({
               )}
             </div>
           ) : (
-            <div className="inline-flex flex-wrap items-center gap-1.5 rounded-full border border-slate-200/90 bg-white/95 py-0.5 pl-2.5 pr-1 text-[11px] text-slate-700 shadow-md backdrop-blur-sm">
+            <div className="pointer-events-auto inline-flex flex-wrap items-center gap-1.5 rounded-full border border-slate-200/90 bg-white/95 py-0.5 pl-2.5 pr-1 text-[11px] text-slate-700 shadow-md backdrop-blur-sm">
               <Navigation className="h-3 w-3 shrink-0 text-slate-400" />
               <span className="font-mono tabular-nums">
                 {gpsPosition.lat.toFixed(6)}, {gpsPosition.lng.toFixed(6)}
@@ -2348,7 +2448,7 @@ export default function ParcelMap({
           <button
             type="button"
             onClick={stopGpsTracking}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-200 bg-white/95 text-slate-500 shadow-md backdrop-blur-sm hover:bg-red-50 hover:text-red-600"
+            className="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-200 bg-white/95 text-slate-500 shadow-md backdrop-blur-sm hover:bg-red-50 hover:text-red-600"
             title="Matikan pelacakan GPS"
             aria-label="Matikan pelacakan GPS"
           >

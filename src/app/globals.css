@@ -43,6 +43,9 @@ body {
   .ldkh-map-canvas:not(.ldkh-map-focus) .maplibregl-ctrl-bottom-right {
     bottom: calc(env(safe-area-inset-bottom, 0px) + 14.5dvh);
   }
+  .ldkh-map-canvas:not(.ldkh-map-focus) .mapbox-gl-draw_ctrl-draw-btn {
+    display: none;
+  }
 }
 
 @media (min-width: 768px) and (max-width: 1279px) {

@@ -264,6 +264,8 @@ export default function Dashboard() {
       setTabletDrawerOpen(true);
       setMobileAiOpen(false);
       setMobileProfileOpen(false);
+    } else {
+      setMobileSheetSnap("peek");
     }
   }, []);
 
