@@ -39,6 +39,15 @@ export default function DocumentViewerPanel({
   const [loading, setLoading] = useState(true);
   const [replacing, setReplacing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isMobileViewport, setIsMobileViewport] = useState(false);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 767px)");
+    const syncViewport = () => setIsMobileViewport(media.matches);
+    syncViewport();
+    media.addEventListener("change", syncViewport);
+    return () => media.removeEventListener("change", syncViewport);
+  }, []);
 
   const loadDocument = useCallback(async () => {
     const detail = await fetchDocumentDetail(documentId);
@@ -207,10 +216,11 @@ export default function DocumentViewerPanel({
           <p className="p-4 text-sm text-red-600">Gagal memuat dokumen: {error}</p>
         )}
         {!loading && !error && tab === "pdf" && pdfUrl && (
-          isGuest ? (
+          isGuest || isMobileViewport ? (
             <GuestCanvasPdfViewer
               pdfUrl={pdfUrl}
               currentUser={currentUser}
+              readOnlyGuest={isGuest}
               onClose={onClose}
             />
           ) : (
